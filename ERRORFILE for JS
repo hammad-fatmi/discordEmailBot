@@ -1,0 +1,121 @@
+//contains error
+import { Client, GatewayIntentBits } from "discord.js";
+import dotenv from "dotenv";
+import { GoogleGenerativeAI } from "@google/generative-ai"; // ✅ correct
+
+
+
+import nodemailer from "nodemailer";
+              
+import Database from "better-sqlite3";            // ← NEW: better-sqlite3 added (line 6)
+import { handleMessage } from "./message.js";
+
+
+// Load .env
+dotenv.config();
+
+// Verify environment variables
+console.log("Google Key Loaded:", !!process.env.GOOGLE_API_KEY);
+console.log("Discord Token Loaded:", !!process.env.DISCORD_BOT_TOKEN);
+console.log("Gmail Address Loaded:", !!process.env.GMAIL_ADDRESS);
+console.log("Gmail App Password Loaded:", !!process.env.GMAIL_APP_PASSWORD);
+
+// Initialize Gemini client
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+
+// Initialize Discord client with voice intents
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    //GatewayIntentBits.GuildVoiceStates,
+  ],
+});
+
+// Initialize nodemailer transporter
+const transporter = nodemailer.createTransport({
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+  auth: {
+    user: process.env.GMAIL_ADDRESS,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+  tls: {
+    rejectUnauthorized: false,
+  },
+});
+
+// 
+const dbPath = "./emails.db";
+let db;                                        
+
+// Store pending confirmations
+const pendingConfirmations = new Map();
+
+(async () => {
+  
+
+ 
+  db = new Database(dbPath);                  
+  db.pragma('journal_mode = WAL');             // ← LINE 62: recommended for performance/safety
+  console.log("Database opened with better-sqlite3");
+
+  
+  db.exec(`                                           
+    CREATE TABLE IF NOT EXISTS emails (
+      alias TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      UNIQUE(email)
+    )
+  `);
+
+  // Discord event handlers
+  client.once("ready", () => {
+    console.log(`Logged in as ${client.user.tag}`);
+  });
+
+  client.on("messageCreate", async (message) => {
+    if (message.author.bot) return;
+
+    // Handle confirmation (yes/no) replies
+    if (pendingConfirmations.has(message.author.id)) {
+      const { data, timer, sendEmail } = pendingConfirmations.get(message.author.id);
+      clearTimeout(timer);
+
+      const reply = message.content.toLowerCase().trim();
+
+      if (reply === "yes") {
+        try {
+          await sendEmail(data);
+          await message.reply(
+            `Email sent successfully to ${data.toEmails.length} To, ${data.ccEmails.length} CC, ${data.bccEmails.length} BCC.`
+          );
+        } catch (err) {
+          console.error("Error sending email:", err);
+          await message.reply("Failed to send email. Please try again.");
+        }
+      } else {
+        await message.reply("Email cancelled. You can write a new one anytime.");
+      }
+
+      pendingConfirmations.delete(message.author.id);
+      return;
+    }
+
+    
+    // Process regular text messages
+    try {
+      await handleMessage(message, db, model, transporter, pendingConfirmations);
+    } catch (err) {
+      console.error("Unhandled error in handleMessage:", err);
+      await message.reply("Something went wrong. Please try again.");
+    }
+  });
+
+  // Login to Discord
+  client.login(process.env.DISCORD_BOT_TOKEN);
+})();
